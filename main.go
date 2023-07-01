@@ -1,13 +1,11 @@
 package main
 
 import (
-	"iris/config"
-	"iris/storage"
+	"iris/storage/journal"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -19,39 +17,28 @@ func main() {
 	logger := log.NewLogfmtLogger(os.Stdout)
 	registerer := prometheus.NewRegistry()
 
-	options := config.IndexOptions{
-		WriteInterval:         1 * time.Second,
-		SegmentSize:           wlog.DefaultSegmentSize,
-		MaxMemoryIndexRecords: 100,
-	}
-
-	index, err := storage.NewOffsetIndex(options, logger, "index", registerer)
+	os.MkdirAll("data", 0777)
+	j, err := journal.NewJournal(logger, registerer, "data", wlog.DefaultSegmentSize)
 
 	if err != nil {
-		level.Error(logger).Log("error while creating index", err)
+		level.Error(logger).Log("err", err)
+		return
 	}
-
-	index.Run()
-
-	wg := &sync.WaitGroup{}
-
-	wg.Add(1)
 
 	done := false
 
-	go func() {
+	wg := sync.WaitGroup{}
 
+	wg.Add(1)
+
+	go func() {
 		defer wg.Done()
 
-		rec := storage.IndexRecord{
-			IndexKey:  0,
-			SegmentId: 0,
-			Position:  0,
-		}
-
 		for !done {
-			rec.IndexKey++
-			index.AddRecord(&rec)
+			if err := j.Log([]byte("It's hello world test for journal")); err != nil {
+				level.Error(logger).Log("err", err)
+			}
+
 		}
 	}()
 

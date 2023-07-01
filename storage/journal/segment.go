@@ -37,12 +37,24 @@ func CreateSegment(dir string, i uint64) (*Segment, error) {
 	}, nil
 }
 
+func OpenReadSegment(fn string) (*Segment, error) {
+	k, err := strconv.ParseUint(filepath.Base(fn), 10, 64)
+	if err != nil {
+		return nil, errors.New("not a valid filename")
+	}
+	f, err := os.Open(fn)
+	if err != nil {
+		return nil, err
+	}
+	return &Segment{SegmentFile: f, i: k, dir: filepath.Dir(fn)}, nil
+}
+
 func SegmentName(dir string, i uint64) string {
 	return filepath.Join(dir, fmt.Sprintf("%020d", i))
 }
 
-func LastSegmentRef(dir string) (*SegmentRef, error) {
-	refs, err := ListSegments(dir)
+func LastSegment(dir string) (*SegmentRef, error) {
+	refs, err := Segments(dir)
 
 	if err != nil {
 		return nil, err
@@ -61,7 +73,7 @@ func LastSegmentRef(dir string) (*SegmentRef, error) {
 	return &refs[len(refs)-1], nil
 }
 
-func ListSegments(dir string) ([]SegmentRef, error) {
+func Segments(dir string) ([]SegmentRef, error) {
 	files, err := os.ReadDir(dir)
 
 	if err != nil {
@@ -92,25 +104,8 @@ func ListSegments(dir string) ([]SegmentRef, error) {
 	return refs, nil
 }
 
-func LoadSegment(dir string, i uint64) (*Segment, error) {
-	fileName := SegmentName(dir, i)
-
-	f, err := os.Open(fileName)
-
-	if err != nil {
-		return nil, err
-	}
-
-	return &Segment{
-		SegmentFile: f,
-		dir:         dir,
-		i:           i,
-	}, nil
-}
-
 func Min(l1 int, l2 int) int {
-
-	if l1 > l2 {
+	if l1 < l2 {
 		return l1
 	}
 

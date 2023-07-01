@@ -3,6 +3,7 @@ package journal
 import (
 	"encoding/binary"
 	"hash/crc32"
+	"sync"
 	"time"
 
 	"github.com/go-kit/log"
@@ -17,8 +18,9 @@ const (
 )
 
 var (
-	InvalidSegmentSize = errors.New("Invalid segment size")
-	JournalClosed      = errors.New("Journal closed")
+	InvalidSegmentSize   = errors.New("Invalid segment size")
+	JournalClosed        = errors.New("Journal closed")
+	JournalAlreadyClosed = errors.New("Journal already closed")
 )
 
 var castagnoliTable = crc32.MakeTable(crc32.Castagnoli)
@@ -26,7 +28,7 @@ var castagnoliTable = crc32.MakeTable(crc32.Castagnoli)
 type page struct {
 	alloc   int
 	flushed int
-	buf     []byte
+	buf     [pageSize]byte
 }
 
 func (p *page) remaining() int {
@@ -66,14 +68,17 @@ type Journal struct {
 	lastOffset uint64
 	donePages  int
 
+	mutex     sync.Mutex
 	closed    bool
 	workQueue chan func()
+	stopc     chan chan struct{}
 }
 
 type JournalMetrics struct {
 	pageFlushes     prometheus.Counter
 	pageCompletions prometheus.Counter
 	fsyncDuration   prometheus.Histogram
+	writesFailed    prometheus.Counter
 }
 
 func NewJournal(logger log.Logger, registerer prometheus.Registerer, dir string, segmentSize int) (*Journal, error) {
@@ -85,32 +90,39 @@ func NewJournal(logger log.Logger, registerer prometheus.Registerer, dir string,
 		logger:      logger,
 		segmentSize: segmentSize,
 		dir:         dir,
+		stopc:       make(chan chan struct{}),
+		workQueue:   make(chan func(), 100),
+		page:        &page{},
 	}
 
 	journal.metrics = NewJournalMetrics(prometheus.WrapRegistererWithPrefix("storage_journal_", registerer))
 
-	lastSegmentRef, err := LastSegmentRef(dir)
+	lastSegmentRef, err := LastSegment(dir)
 
 	if err != nil {
 		return nil, err
 	}
 
 	var segment *Segment
-	if lastSegmentRef == nil {
-		segment, err = CreateSegment(dir, 0)
+	writeSegmentInd := uint64(0)
 
-		if err != nil {
-			return nil, err
-		}
+	if lastSegmentRef != nil {
+		//load the latest of add + 1 to create new segment index
+		// journal.lastOffset =
+		// writeSegmentInd = lastSegmentRef.index +
+
+		writeSegmentInd = 2
 	}
 
-	segment, err = LoadSegment(dir, lastSegmentRef.index)
+	segment, err = CreateSegment(dir, writeSegmentInd)
 
 	if err != nil {
 		return nil, err
 	}
 
 	journal.setSegment(segment)
+
+	go journal.run()
 
 	return journal, nil
 }
@@ -132,6 +144,11 @@ func NewJournalMetrics(registerer prometheus.Registerer) *JournalMetrics {
 		Name:       "fsync_duration_seconds",
 		Help:       "Duration of write log fsync.",
 		Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+	})
+
+	m.writesFailed = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "writes_failed_total",
+		Help: "Total number of write log writes that failed.",
 	})
 
 	return m
@@ -184,6 +201,20 @@ func (j *Journal) flushPage(clear bool) error {
 	return nil
 }
 
+func (j *Journal) Log(recs ...[]byte) error {
+	j.mutex.Lock()
+	defer j.mutex.Unlock()
+
+	for i, r := range recs {
+		if err := j.log(r, i == len(recs)-1); err != nil {
+			j.metrics.writesFailed.Inc()
+			return err
+		}
+	}
+
+	return nil
+}
+
 // First Byte of header format:
 // [ 4 bits unallocated] [1 bit snappy compression flag] [ 3 bit record type ]
 const (
@@ -216,8 +247,11 @@ func (j *Journal) log(rec []byte, final bool) error {
 	leftPageCount := j.pagesPerSegment() - j.donePages - 1
 	left += (pageSize - recordHeaderSize) * leftPageCount //pages left for active segmet
 
+	//increase offset before writing the record
+	j.lastOffset++
+
 	if len(rec) > left {
-		if err := j.nextSegment(true, j.lastOffset+1); err != nil {
+		if err := j.nextSegment(true, j.lastOffset); err != nil {
 			return err
 		}
 	}
@@ -246,10 +280,9 @@ func (j *Journal) log(rec []byte, final bool) error {
 		buf[0] = byte(recType)
 		crc := crc32.Checksum(bytesFitPage, castagnoliTable)
 
-		j.lastOffset++
 		binary.BigEndian.PutUint16(buf[1:], uint16(len(bytesFitPage)))
-		binary.BigEndian.PutUint32(buf[3:], crc)
-		binary.BigEndian.PutUint64(buf[4:], j.lastOffset)
+		binary.BigEndian.PutUint64(buf[3:], j.lastOffset)
+		binary.BigEndian.PutUint32(buf[11:], crc)
 
 		copy(buf[recordHeaderSize:], bytesFitPage)
 
@@ -319,4 +352,59 @@ func (j *Journal) fsync(s *Segment) error {
 	j.metrics.fsyncDuration.Observe(time.Since(now).Seconds())
 
 	return err
+}
+
+func (j *Journal) run() {
+Loop:
+	for {
+		select {
+		case f := <-j.workQueue:
+			f()
+		case donec := <-j.stopc:
+			close(j.workQueue)
+			defer close(donec)
+			break Loop
+		}
+	}
+
+	for f := range j.workQueue {
+		f()
+	}
+}
+
+func (j *Journal) Stop() error {
+
+	j.mutex.Lock()
+	defer j.mutex.Unlock()
+
+	if j.closed {
+		return JournalAlreadyClosed
+	}
+
+	if j.segment == nil {
+		j.closed = true
+		return nil
+	}
+
+	// Flush the last page and zero out all its remaining size.
+	// We must not flush an empty page as it would falsely signal
+	// the segment is done if we start writing to it again after opening.
+	if j.page.alloc > 0 {
+		if err := j.flushPage(true); err != nil {
+			return err
+		}
+	}
+
+	donec := make(chan struct{})
+	j.stopc <- donec
+	<-donec
+
+	if err := j.fsync(j.segment); err != nil {
+		level.Error(j.logger).Log("msg", "sync previous segment", "err", err)
+	}
+	if err := j.segment.Close(); err != nil {
+		level.Error(j.logger).Log("msg", "close previous segment", "err", err)
+	}
+	j.closed = true
+	return nil
 }
