@@ -1,8 +1,7 @@
-package journal
+package wal
 
 import (
 	"fmt"
-	"iris/storage"
 	"os"
 	"path/filepath"
 	"sort"
@@ -19,12 +18,13 @@ type Segment struct {
 }
 
 type SegmentRef struct {
-	name  string
-	index uint64
+	name       string
+	index      uint64
+	exntension string
 }
 
-func CreateSegment(dir string, i uint64) (*Segment, error) {
-	f, err := os.OpenFile(SegmentName(dir, i), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o666)
+func CreateSegment(dir string, i uint64, extension string) (*Segment, error) {
+	f, err := os.OpenFile(SegmentName(dir, i, extension), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o666)
 
 	if err != nil {
 		return nil, err
@@ -49,8 +49,8 @@ func OpenReadSegment(fn string) (*Segment, error) {
 	return &Segment{SegmentFile: f, i: k, dir: filepath.Dir(fn)}, nil
 }
 
-func SegmentName(dir string, i uint64) string {
-	return filepath.Join(dir, fmt.Sprintf("%020d", i))
+func SegmentName(dir string, i uint64, extension string) string {
+	return fmt.Sprintf("%s.%s", filepath.Join(dir, fmt.Sprintf("%020d", i)), extension)
 }
 
 func LastSegment(dir string) (*SegmentRef, error) {
@@ -85,7 +85,7 @@ func Segments(dir string) ([]SegmentRef, error) {
 	for _, file := range files {
 
 		fileName := file.Name()
-		fileNameWithoutExtension := storage.FileNameWithoutExtension(fileName)
+		fileNameWithoutExtension := FileNameWithoutExtension(fileName)
 
 		i, err := strconv.ParseUint(fileNameWithoutExtension, 10, 64)
 
@@ -94,8 +94,9 @@ func Segments(dir string) ([]SegmentRef, error) {
 		}
 
 		segmentRef := SegmentRef{
-			name:  fileName,
-			index: i,
+			name:       fileName,
+			index:      i,
+			exntension: filepath.Ext(fileName),
 		}
 
 		refs = append(refs, segmentRef)
@@ -110,4 +111,8 @@ func Min(l1 int, l2 int) int {
 	}
 
 	return l2
+}
+
+func FileNameWithoutExtension(fileName string) string {
+	return fileName[:len(fileName)-len(filepath.Ext(fileName))]
 }

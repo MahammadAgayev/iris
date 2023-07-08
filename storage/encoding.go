@@ -1,28 +1,18 @@
 package storage
 
-import "github.com/prometheus/prometheus/tsdb/encoding"
+import "encoding/binary"
 
-func EncodeIndexRecord(record IndexRecord, buffer []byte) []byte {
-	var buf encoding.Encbuf
-	buf.B = buffer
-
-	buf.PutUvarint64(record.IndexKey)
-	buf.PutUvarint64(record.SegmentId)
-	buf.PutUvarint64(record.SegmentId)
-
-	return buf.Get()
+func EncodeIndex(rec IndexRecord, bytes []byte) {
+	binary.BigEndian.PutUint64(bytes, rec.key)
+	binary.BigEndian.PutUint64(bytes, rec.value)
 }
 
-func EncodeRecord(record Record, buffer []byte) []byte {
-	var buf encoding.Encbuf
-	buf.B = buffer
+func DecodeIndex(bytes []byte) IndexRecord {
+	key := binary.BigEndian.Uint64(bytes[:4])
+	value := binary.BigEndian.Uint64(bytes[4:])
 
-	buf.PutUvarint64(record.Offset)
-	buf.PutUvarint32(record.KeySize)
-	buf.PutUvarint32(record.ValueSize)
-	buf.PutVarint64(record.CreatedAt)
-	buf.PutUvarintBytes(record.Key)
-	buf.PutUvarintBytes(record.Value)
-
-	return buf.Get()
+	return IndexRecord{
+		key:   key,
+		value: value,
+	}
 }

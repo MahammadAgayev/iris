@@ -1,4 +1,4 @@
-package journal
+package wal
 
 import (
 	"encoding/binary"
@@ -14,13 +14,13 @@ import (
 
 const (
 	pageSize         = 32 * 1024 // 32KB
-	recordHeaderSize = 15
+	recordHeaderSize = 7
 )
 
 var (
-	InvalidSegmentSize   = errors.New("Invalid segment size")
-	JournalClosed        = errors.New("Journal closed")
-	JournalAlreadyClosed = errors.New("Journal already closed")
+	InvalidSegmentSize = errors.New("Invalid segment size")
+	WalClosed          = errors.New("Journal closed")
+	WalAlreadyClosed   = errors.New("Journal already closed")
 )
 
 var castagnoliTable = crc32.MakeTable(crc32.Castagnoli)
@@ -52,21 +52,16 @@ func (p *page) data() []byte {
 	return p.buf[p.flushed:p.alloc]
 }
 
-type JournalRecord struct {
-	Offset  uint64
-	Content []byte
-}
-
-type Journal struct {
+type Wal struct {
 	logger      log.Logger
 	segmentSize int
 	dir         string
-	metrics     *JournalMetrics
+	metrics     *WalMetrics
+	extension   string
 
-	segment    *Segment
-	page       *page
-	lastOffset uint64
-	donePages  int
+	segment   *Segment
+	page      *page
+	donePages int
 
 	mutex     sync.Mutex
 	closed    bool
@@ -74,28 +69,29 @@ type Journal struct {
 	stopc     chan chan struct{}
 }
 
-type JournalMetrics struct {
+type WalMetrics struct {
 	pageFlushes     prometheus.Counter
 	pageCompletions prometheus.Counter
 	fsyncDuration   prometheus.Histogram
 	writesFailed    prometheus.Counter
 }
 
-func NewJournal(logger log.Logger, registerer prometheus.Registerer, dir string, segmentSize int) (*Journal, error) {
+func NewWal(logger log.Logger, registerer prometheus.Registerer, dir string, segmentSize int, extension string) (*Wal, error) {
 	if segmentSize%pageSize != 0 {
 		return nil, InvalidSegmentSize
 	}
 
-	journal := &Journal{
+	wal := &Wal{
 		logger:      logger,
 		segmentSize: segmentSize,
 		dir:         dir,
 		stopc:       make(chan chan struct{}),
 		workQueue:   make(chan func(), 100),
 		page:        &page{},
+		extension:   extension,
 	}
 
-	journal.metrics = NewJournalMetrics(prometheus.WrapRegistererWithPrefix("storage_journal_", registerer))
+	wal.metrics = NewWalMetrics(prometheus.WrapRegistererWithPrefix("storage_wal_", registerer))
 
 	lastSegmentRef, err := LastSegment(dir)
 
@@ -107,6 +103,7 @@ func NewJournal(logger log.Logger, registerer prometheus.Registerer, dir string,
 	writeSegmentInd := uint64(0)
 
 	if lastSegmentRef != nil {
+		//TODO
 		//load the latest of add + 1 to create new segment index
 		// journal.lastOffset =
 		// writeSegmentInd = lastSegmentRef.index +
@@ -114,21 +111,21 @@ func NewJournal(logger log.Logger, registerer prometheus.Registerer, dir string,
 		writeSegmentInd = 2
 	}
 
-	segment, err = CreateSegment(dir, writeSegmentInd)
+	segment, err = CreateSegment(dir, writeSegmentInd, extension)
 
 	if err != nil {
 		return nil, err
 	}
 
-	journal.setSegment(segment)
+	wal.setSegment(segment)
 
-	go journal.run()
+	go wal.run()
 
-	return journal, nil
+	return wal, nil
 }
 
-func NewJournalMetrics(registerer prometheus.Registerer) *JournalMetrics {
-	m := &JournalMetrics{}
+func NewWalMetrics(registerer prometheus.Registerer) *WalMetrics {
+	m := &WalMetrics{}
 
 	m.pageFlushes = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "page_flushes_total",
@@ -154,7 +151,7 @@ func NewJournalMetrics(registerer prometheus.Registerer) *JournalMetrics {
 	return m
 }
 
-func (j *Journal) setSegment(segment *Segment) error {
+func (j *Wal) setSegment(segment *Segment) error {
 	j.segment = segment
 
 	stat, err := segment.Stat()
@@ -168,11 +165,11 @@ func (j *Journal) setSegment(segment *Segment) error {
 	return nil
 }
 
-func (j *Journal) pagesPerSegment() int {
+func (j *Wal) pagesPerSegment() int {
 	return j.segmentSize / pageSize
 }
 
-func (j *Journal) flushPage(clear bool) error {
+func (j *Wal) flushPage(clear bool) error {
 	j.metrics.pageFlushes.Inc()
 
 	page := j.page
@@ -201,15 +198,13 @@ func (j *Journal) flushPage(clear bool) error {
 	return nil
 }
 
-func (j *Journal) Log(recs ...[]byte) error {
+func (j *Wal) Log(rec []byte, baseOffset uint64) error {
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 
-	for i, r := range recs {
-		if err := j.log(r, i == len(recs)-1); err != nil {
-			j.metrics.writesFailed.Inc()
-			return err
-		}
+	if err := j.log(rec, baseOffset, true); err != nil {
+		j.metrics.writesFailed.Inc()
+		return err
 	}
 
 	return nil
@@ -236,7 +231,7 @@ func recTypeFromHeader(header byte) recType {
 	return recType(header & recTypeMask)
 }
 
-func (j *Journal) log(rec []byte, final bool) error {
+func (j *Wal) log(rec []byte, baseOffset uint64, final bool) error {
 	if j.page.full() {
 		if err := j.flushPage(true); err != nil {
 			return err
@@ -247,11 +242,8 @@ func (j *Journal) log(rec []byte, final bool) error {
 	leftPageCount := j.pagesPerSegment() - j.donePages - 1
 	left += (pageSize - recordHeaderSize) * leftPageCount //pages left for active segmet
 
-	//increase offset before writing the record
-	j.lastOffset++
-
 	if len(rec) > left {
-		if err := j.nextSegment(true, j.lastOffset); err != nil {
+		if err := j.nextSegment(true, baseOffset); err != nil {
 			return err
 		}
 	}
@@ -281,8 +273,7 @@ func (j *Journal) log(rec []byte, final bool) error {
 		crc := crc32.Checksum(bytesFitPage, castagnoliTable)
 
 		binary.BigEndian.PutUint16(buf[1:], uint16(len(bytesFitPage)))
-		binary.BigEndian.PutUint64(buf[3:], j.lastOffset)
-		binary.BigEndian.PutUint32(buf[11:], crc)
+		binary.BigEndian.PutUint32(buf[3:], crc)
 
 		copy(buf[recordHeaderSize:], bytesFitPage)
 
@@ -306,9 +297,9 @@ func (j *Journal) log(rec []byte, final bool) error {
 	return nil
 }
 
-func (j *Journal) nextSegment(async bool, offset uint64) error {
+func (j *Wal) nextSegment(async bool, offset uint64) error {
 	if j.closed {
-		return JournalClosed
+		return WalClosed
 	}
 
 	if j.page.alloc > 0 {
@@ -317,7 +308,7 @@ func (j *Journal) nextSegment(async bool, offset uint64) error {
 		}
 	}
 
-	next, err := CreateSegment(j.dir, offset)
+	next, err := CreateSegment(j.dir, offset, j.extension)
 
 	if err != nil {
 		return err
@@ -345,7 +336,7 @@ func (j *Journal) nextSegment(async bool, offset uint64) error {
 	return nil
 }
 
-func (j *Journal) fsync(s *Segment) error {
+func (j *Wal) fsync(s *Segment) error {
 	now := time.Now()
 	err := s.Sync()
 
@@ -354,7 +345,7 @@ func (j *Journal) fsync(s *Segment) error {
 	return err
 }
 
-func (j *Journal) run() {
+func (j *Wal) run() {
 Loop:
 	for {
 		select {
@@ -372,13 +363,13 @@ Loop:
 	}
 }
 
-func (j *Journal) Stop() error {
+func (j *Wal) Stop() error {
 
 	j.mutex.Lock()
 	defer j.mutex.Unlock()
 
 	if j.closed {
-		return JournalAlreadyClosed
+		return WalAlreadyClosed
 	}
 
 	if j.segment == nil {
@@ -407,4 +398,13 @@ func (j *Journal) Stop() error {
 	}
 	j.closed = true
 	return nil
+}
+
+func (j *Wal) ActiveSegmentRef() SegmentRef {
+
+	return SegmentRef{
+		name:       SegmentName(j.segment.dir, j.segment.i, j.extension),
+		index:      j.segment.i,
+		exntension: j.extension,
+	}
 }

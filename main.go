@@ -35,9 +35,10 @@ func main() {
 		defer wg.Done()
 
 		for !done {
-			if err := j.Log([]byte("It's hello world test for journal")); err != nil {
-				level.Error(logger).Log("err", err)
-			}
+
+			// if err := j.Log([]byte("It's hello world test for journal"), ); err != nil {
+			// 	level.Error(logger).Log("err", err)
+			// }
 
 		}
 	}()

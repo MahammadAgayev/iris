@@ -6,12 +6,12 @@ type BytesPool struct {
 	pool sync.Pool
 }
 
-func NewBytesPool() *BytesPool {
+func NewBytesPool(size int) *BytesPool {
 	return &BytesPool{
 		pool: sync.Pool{
 			New: func() any {
-				buf := new([]byte)            // Attempt to force allocation on heap.
-				*buf = make([]byte, 0, 1<<10) // 1kb
+				buf := new([]byte) // Attempt to force allocation on heap.
+				*buf = make([]byte, 0, size)
 				return buf
 			},
 		},
