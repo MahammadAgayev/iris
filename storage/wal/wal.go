@@ -34,6 +34,7 @@ type page struct {
 
 func (p *page) remaining() int {
 	return pageSize - p.alloc
+
 }
 
 func (p *page) full() bool {
@@ -199,20 +200,22 @@ func (j *Wal) flushPage(clear bool) error {
 	return nil
 }
 
-func (j *Wal) Log(rec []byte, baseOffset uint64) error {
-	j.mutex.Lock()
-	defer j.mutex.Unlock()
+func (w *Wal) Log(vOffset uint64, recs ...[]byte) error {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
 
-	if err := j.log(rec, baseOffset, true); err != nil {
-		j.metrics.writesFailed.Inc()
-		return err
+	for i, r := range recs {
+		if err := w.log(r, vOffset, i == len(recs)-1); err != nil {
+			w.metrics.writesFailed.Inc()
+			return err
+		}
 	}
-
 	return nil
 }
 
 // First Byte of header format:
 // [ 4 bits unallocated] [1 bit snappy compression flag] [ 3 bit record type ]
+// Currently not implemented
 const (
 	snappyMask  = 1 << 3
 	recTypeMask = snappyMask - 1
@@ -401,10 +404,10 @@ func (j *Wal) Stop() error {
 	return nil
 }
 
-func (j *Wal) ActiveSegmentRef() SegmentRef {
+func (w *Wal) ActiveSegmentRef() SegmentRef {
 	return SegmentRef{
-		name:       SegmentName(j.segment.dir, j.segment.i, j.extension),
-		index:      j.segment.i,
-		exntension: j.extension,
+		name:       ToSegmentName(w.segment.dir, w.segment.i, w.extension),
+		index:      w.segment.i,
+		extension: w.extension,
 	}
 }

@@ -1,10 +1,14 @@
 module iris
 
-go 1.20
+go 1.23.0
+
+toolchain go1.23.6
 
 require (
+	github.com/go-faker/faker/v4 v4.6.0 // indirect
 	github.com/go-kit/log v0.2.1 // indirect
 	github.com/prometheus/client_golang v1.15.0 // indirect
+	golang.org/x/text v0.23.0 // indirect
 )
 
 require (
@@ -25,7 +29,7 @@ require (
 	github.com/prometheus/common v0.42.0 // indirect
 	github.com/prometheus/procfs v0.9.0 // indirect
 	github.com/prometheus/prometheus v0.44.0
-	github.com/stretchr/testify v1.8.2 // indirect
+	github.com/stretchr/testify v1.10.0 // indirect
 	go.uber.org/atomic v1.10.0 // indirect
 	go.uber.org/goleak v1.2.1 // indirect
 	golang.org/x/exp v0.0.0-20230321023759-10a507213a29 // indirect

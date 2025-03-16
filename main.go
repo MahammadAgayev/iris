@@ -8,6 +8,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/go-faker/faker/v4"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
@@ -28,7 +29,6 @@ func main() {
 	}
 
 	done := false
-
 	wg := sync.WaitGroup{}
 
 	wg.Add(1)
@@ -40,9 +40,12 @@ func main() {
 
 		now := time.Now()
 
+        sentence := faker.Sentence()
+        bytesOfSentence := []byte(sentence)
+
 		for !done {
 
-			if err := w.Log([]byte("It's hello world test for journal"), uint64(offset)); err != nil {
+			if err := w.Log(uint64(offset), bytesOfSentence); err != nil {
 				level.Error(logger).Log("err", err)
 			}
 
@@ -62,4 +65,10 @@ func main() {
 	wg.Wait()
 
 	logger.Log("msg", "exiting...")
+}
+
+func maybePanic(err error) {
+    if err != nil {
+        panic(err)
+    }
 }

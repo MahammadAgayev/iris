@@ -22,6 +22,10 @@ func NewReader(reader io.Reader) *Reader {
 	return &Reader{reader: reader}
 }
 
+func (r *Reader) Record() []byte {
+	return r.rec
+}
+
 func (r *Reader) Next() bool {
 	err := r.next()
 
